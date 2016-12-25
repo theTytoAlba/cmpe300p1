@@ -13,8 +13,13 @@
 #define REQUEST_BELOW_TAG 2
 #define INCOMING_LINE_TAG 3
 #define SMOOTHING_RESULT_TAG 4
-#define BOSS_RECEIVED_SMOOTH 5
-
+#define TRESHOLDING_RESULT_TAG 5
+#define BOSS_RECEIVED_SMOOTH 6
+#define BOSS_RECEIVED_TRESHOLDED 7
+#define SMOOTHING_PROCESS 8
+#define TRESHOLDING_PROCESS 9
+#define COLLECT_SMOOTHED 10
+#define COLLECT_TRESHOLDED 11
 /**
  * Allocates a 2D integer array of given size.
  */
@@ -39,6 +44,48 @@ int smooth(int window[3][3]){
         }
     }
     return sum/9.0;
+}
+
+int treshold(int window[3][3]) {
+    int calc[4];
+    // Calculate horizontal
+    calc[0] = 0;
+    for (int i = 0; i < 3; i++) {
+        calc[0] -= window[0][i];
+        calc[0] += 2*window[1][i];
+        calc[0] -= window[2][i];
+    }
+    // Calculate vertical
+    calc[1] = 0;
+    for (int i = 0; i < 3; i++) {
+        calc[1] -= window[i][0];
+        calc[1] += 2*window[i][1];
+        calc[1] -= window[i][2];
+    }
+    // Calculate +45
+    calc[2] = 0;
+    for (int i = 0; i < 3; i++) {
+        calc[2] -= window[(i+1)%3][2-i];
+        calc[2] += 2*window[i][2-i];
+        calc[2] -= window[i][(4-i)%3];
+    }
+    // Calculate -45
+    calc[3] = 0;
+    for (int i = 0; i < 3; i++) {
+        calc[3] -= window[(i+1)%3][i];
+        calc[3] += 2*window[i][i];
+        calc[3] -= window[i][(i+1)%3];
+    }
+
+    //treshold
+    int result = 0;
+    for (int i = 0; i < 4; i++) {
+        if (calc[i] > 10) {
+            result = 255;
+            break;
+        }
+    }
+    return result;
 }
 
 /**
@@ -85,10 +132,59 @@ void writeOutput(int **matrix, int rows, int columns, char *name) {
     printf("Data written to %s.\n", name);
 }
 
+void collectParts(int size, int tag, int **resultPart, int **result) {
+    MPI_Status status;
+    int slaveRows = 200/(size-1);
+    int columns;
+    if (tag == COLLECT_SMOOTHED) {
+        columns = 198;
+    } else if (tag == COLLECT_TRESHOLDED) {
+        columns = 196;
+    }
+    int partSize = slaveRows*columns;
+    
+    // First and last processor's row number is less. Lack keeps number of missing lines.
+    int lack;
+    if (tag == COLLECT_SMOOTHED) {
+        lack = 1;
+    } else if (tag == COLLECT_TRESHOLDED) {
+        lack = 2;
+    }
+
+
+    for (int i = 0; i < size-1; i++) {
+        int resultTag = (tag == COLLECT_SMOOTHED) ? SMOOTHING_RESULT_TAG : TRESHOLDING_RESULT_TAG;
+        MPI_Recv(&resultPart[0][0], partSize, MPI_INT, MPI_ANY_SOURCE, resultTag, MPI_COMM_WORLD, &status);
+        // if it is the first or last one, take slaveRows-lack line.
+        if (status.MPI_SOURCE == 1) {
+            for (int j = 0; j < slaveRows-lack; j++) {
+                for (int k = 0; k < columns; k++) {
+                    result[j][k] = resultPart[j][k];
+                }
+            }
+        } else if (status.MPI_SOURCE == size-1) {
+            for (int j = 0; j < slaveRows-lack; j++) {
+                for (int k = 0; k < columns; k++) {
+                    int resultRowStart = (status.MPI_SOURCE-1)*slaveRows - lack;
+                    result[resultRowStart + j][k] = resultPart[j][k];
+                }
+            }
+        } else {
+            for (int j = 0; j < slaveRows; j++) {
+                for (int k = 0; k < columns; k++) {
+                    int resultRowStart = (status.MPI_SOURCE-1)*slaveRows - 1;
+                    result[resultRowStart + j][k] = resultPart[j][k];
+                }
+            }
+        }
+    }
+}
+
 /**
  * Processor 0 will use boss mode.
  */
 void bossMode(int size) {
+    MPI_Request otherRequests;
     // The boss will read the input.
     printf("Reading the input.\n");
     int **matrix = readInput();
@@ -104,78 +200,67 @@ void bossMode(int size) {
     int **smoothed = allocate2DArray(198, 198);
     int **smoothedPart = allocate2DArray(slaveRows, 198);
 
-    // Receive the parts from everyone and merge. 
-    for (int i = 0; i < size-1; i++) {
-        MPI_Status status;
-        MPI_Recv(&smoothedPart[0][0], 198*slaveRows, MPI_INT, MPI_ANY_SOURCE, SMOOTHING_RESULT_TAG, MPI_COMM_WORLD, &status);
-
-        // if it is the first or last one, take slaveRows-1 line.
-        if (status.MPI_SOURCE == 1) {
-            for (int j = 0; j < slaveRows-1; j++) {
-                for (int k = 0; k < 198; k++) {
-                    smoothed[j][k] = smoothedPart[j][k];
-                }
-            }
-        } else if (status.MPI_SOURCE == size-1) {
-            for (int j = 0; j < slaveRows-1; j++) {
-                for (int k = 0; k < 198; k++) {
-                    int smoothRowStart = (status.MPI_SOURCE-1)*slaveRows - 1;
-                    smoothed[smoothRowStart + j][k] = smoothedPart[j][k];
-                }
-            }
-        } else {
-            for (int j = 0; j < slaveRows; j++) {
-                for (int k = 0; k < 198; k++) {
-                    int smoothRowStart = (status.MPI_SOURCE-1)*slaveRows - 1;
-                    smoothed[smoothRowStart + j][k] = smoothedPart[j][k];
-                }
-            }
-        }
-    }
+    // Receive the smoothed parts from everyone and merge. 
+    collectParts(size, COLLECT_SMOOTHED, smoothedPart, smoothed);
+    printf("collected smoothed\n");
 
     // Tell slaves to stop waiting.
     for (int i = 1; i < size; i++) {
-        MPI_Request otherRequests;
         MPI_Isend(&i, 1, MPI_INT, i, BOSS_RECEIVED_SMOOTH, MPI_COMM_WORLD, &otherRequests);
     }
     // Write output.
     writeOutput(smoothed, 198, 198, "smoothed.txt");
+
+    // Allocate space for tresholded image.
+    int **tresholded = allocate2DArray(196, 196);    
+    int **tresholdedPart = allocate2DArray(slaveRows, 196);
+
+    // Receive the tresholded parts from everyone and merge. 
+    collectParts(size, COLLECT_TRESHOLDED, tresholdedPart, tresholded);
+    printf("collected tresholded\n");
+
+    // Tell slaves to stop waiting.
+    for (int i = 1; i < size; i++) {
+       MPI_Isend(&i, 1, MPI_INT, i, BOSS_RECEIVED_TRESHOLDED, MPI_COMM_WORLD, &otherRequests);
+    }
+    // Write output.
+    writeOutput(tresholded, 196, 196, "tresholded.txt");
 }
 
-/**
- * Processors 1, 2, ...,n will use slave mode. 
- */
-void slaveMode(int rank, int size) {
+int **processPart(int rank, int size, int **matrixPart, int tag) {
     MPI_Status status;
     MPI_Request otherRequests;
 
-    // Allocate space.
-    int rows = 200/(size-1);
-    int **matrixPart = allocate2DArray(rows, 200);
+    // Find number of rows for the given matrix
+    int rows = 200/(size-1), columns;
+    int resultRows = rows;
     
-    // Receive matrix part.
-    MPI_Recv(&matrixPart[0][0], rows*200, MPI_INT, 0, DEFAULT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    printf("Process %d has received the matrix part.\n", rank);
-    
-    // Allocate space for smoothed matrix. First and last parts have one less line.
-    int smoothedRows = rows;
-    if ((rank == 1) || (rank == (size-1))) {
-        smoothedRows -= 1;
+    if (tag == SMOOTHING_PROCESS) {
+        columns = 200;    
+        if ((rank == 1) || (rank == (size-1))) {
+            resultRows -= 1;
+        }
+    } else if (tag == TRESHOLDING_PROCESS) {
+        columns = 198;
+        if ((rank == 1) || (rank == (size-1))) {
+            rows -= 1;
+            resultRows -= 2;
+        }
     }
     
-    int **smoothedPart = allocate2DArray(smoothedRows, 198);
-    
+    // Allocate space for result matrix. First and last parts have one less line.
+    int **processResult = allocate2DArray(resultRows, columns-2);
+
     // Smooth the part.
-    for (int smoothedRow = 0, currentRow = (rank == 1 ? 1 : 0); smoothedRow < smoothedRows; currentRow++, smoothedRow++) {
-        for (int currCol = 1; currCol < 199; currCol++) {
-            // Construct 3*3 matrix to be smoothed.
+    for (int resultRow = 0, currentRow = (rank == 1 ? 1 : 0); resultRow < resultRows; currentRow++, resultRow++) {
+        for (int currCol = 1; currCol < columns-1; currCol++) {
+            // Construct 3*3 matrix to be processed.
             int conv[3][3];
             // Prepare request variables.
             MPI_Request requestAbove, requestBelow;
             int waitingAbove = 0, waitingBelow = 0;
             // Put the top three. If we need info from above, send request.
             if (currentRow == 0) {
-                // Request an array of 3, starting from current column-1.
                 int startColumn = currCol - 1;
                 MPI_Isend(&startColumn, 1, MPI_INT, rank-1, REQUEST_ABOVE_TAG, MPI_COMM_WORLD, &requestAbove);
                 waitingAbove = 1;
@@ -188,6 +273,7 @@ void slaveMode(int rank, int size) {
             conv[1][0] = matrixPart[currentRow][currCol-1];
             conv[1][1] = matrixPart[currentRow][currCol];
             conv[1][2] = matrixPart[currentRow][currCol+1];
+
             // Put the bottom three. If we need info from below, send request.
             if (currentRow == rows-1) {
                 // Request an array of 3, starting from current column-1.
@@ -239,12 +325,34 @@ void slaveMode(int rank, int size) {
             }
 
             // Now the conv matrix is complete, do the smoothing.
-            smoothedPart[smoothedRow][currCol-1] = smooth(conv);
+            if (tag == SMOOTHING_PROCESS) {
+                processResult[resultRow][currCol-1] = smooth(conv);
+            } else if (tag == TRESHOLDING_PROCESS) {
+                processResult[resultRow][currCol-1] = treshold(conv);
+            }
         }
     }
+    return processResult;
+}
 
-    // Send the result to the boss and wait for its approval before continuing.
-    MPI_Isend(&smoothedPart[0][0], smoothedRows*198, MPI_INT, 0, SMOOTHING_RESULT_TAG, MPI_COMM_WORLD, &otherRequests);
+void waitForBoss(int rank, int size, int **currentPart, int tag) {
+    MPI_Status status;
+    MPI_Request otherRequests;
+
+    int rows = 200/(size-1);
+    // Find the number of rows for this process.
+    //int processedRows = rows;
+
+    // First and last processor's row number is less. Lack keeps number of missing lines.
+    int lack = 0;
+    if ((rank == 1 || rank == (size-1)) && tag == COLLECT_TRESHOLDED) {
+        lack = 1;
+    }
+
+    if ((rank == 1) || (rank == (size-1))) {
+      //  processedRows -= lack;
+    }
+
     printf("Now waiting for boss to tell me its OK to continue.\n");
     int bossSaidOk = 0;
     while (!bossSaidOk) {
@@ -254,22 +362,59 @@ void slaveMode(int rank, int size) {
             // Processor below is making a request.
             int startColumn = received;
             int requested[3];
-            requested[0] = matrixPart[rows-1][startColumn];
-            requested[1] = matrixPart[rows-1][startColumn+1];
-            requested[2] = matrixPart[rows-1][startColumn+2];
+            requested[0] = currentPart[rows-lack-1][startColumn];
+            requested[1] = currentPart[rows-lack-1][startColumn+1];
+            requested[2] = currentPart[rows-lack-1][startColumn+2];
             MPI_Isend(&requested, 3, MPI_INT, rank+1, INCOMING_LINE_TAG, MPI_COMM_WORLD, &otherRequests);
         } else if (status.MPI_TAG == REQUEST_BELOW_TAG) {
             // Processor above is making a request.
             int startColumn = received;
             int requested[3];
-            requested[0] = matrixPart[0][startColumn];
-            requested[1] = matrixPart[0][startColumn+1];
-            requested[2] = matrixPart[0][startColumn+2];
+            requested[0] = currentPart[0][startColumn];
+            requested[1] = currentPart[0][startColumn+1];
+            requested[2] = currentPart[0][startColumn+2];
             MPI_Isend(&requested, 3, MPI_INT, rank-1, INCOMING_LINE_TAG, MPI_COMM_WORLD, &otherRequests);
-        } else if (status.MPI_TAG == BOSS_RECEIVED_SMOOTH) {
+        } else if (status.MPI_TAG == tag) {
             bossSaidOk = 1;
         }
     }
+}
+
+/**
+ * Processors 1, 2, ...,n will use slave mode. 
+ */
+void slaveMode(int rank, int size) {
+    MPI_Status status;
+    MPI_Request otherRequests;
+
+    // Allocate space.
+    int rows = 200/(size-1);
+    int **matrixPart = allocate2DArray(rows, 200);
+    
+    // Receive matrix part.
+    MPI_Recv(&matrixPart[0][0], rows*200, MPI_INT, 0, DEFAULT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    printf("Process %d has received the matrix part.\n", rank);
+    
+    // Find the number of rows for this process.
+    int smoothedRows = rows;
+    if ((rank == 1) || (rank == (size-1))) {
+        smoothedRows -= 1;
+    }
+
+    // Send the result to the boss and wait for its approval before continuing.
+    int **smoothedPart = processPart(rank, size, matrixPart, SMOOTHING_PROCESS);
+    MPI_Isend(&smoothedPart[0][0], smoothedRows*198, MPI_INT, 0, SMOOTHING_RESULT_TAG, MPI_COMM_WORLD, &otherRequests);
+    waitForBoss(rank, size, matrixPart, BOSS_RECEIVED_SMOOTH);
+
+    // Find the number of rows for this process.
+    int tresholdRows = rows;
+    if ((rank == 1) || (rank == (size-1))) {
+        tresholdRows -= 2;
+    }
+
+    int **tresholdPart = processPart(rank, size, smoothedPart, TRESHOLDING_PROCESS); 
+    MPI_Isend(&tresholdPart[0][0], tresholdRows*196, MPI_INT, 0, TRESHOLDING_RESULT_TAG, MPI_COMM_WORLD, &otherRequests);
+    waitForBoss(rank, size, matrixPart, BOSS_RECEIVED_TRESHOLDED);
 }
 
 int main(int argc, char* argv[])
