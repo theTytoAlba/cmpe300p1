@@ -46,7 +46,7 @@ int smooth(int window[3][3]){
     return sum/9.0;
 }
 
-int treshold(int window[3][3]) {
+int treshold(int window[3][3], int tresholdNumber) {
     int calc[4];
     // Calculate horizontal
     calc[0] = 0;
@@ -80,7 +80,7 @@ int treshold(int window[3][3]) {
     //treshold
     int result = 0;
     for (int i = 0; i < 4; i++) {
-        if (calc[i] > 10) {
+        if (calc[i] > tresholdNumber) {
             result = 255;
             break;
         }
@@ -92,9 +92,9 @@ int treshold(int window[3][3]) {
  * Reads 200*200 input from file input.txt
  * Returns a int **, which is the 200*200 integer array that is read. 
  */
-int **readInput() {
+int **readInput(char *input) {
     // Prepare the reader.
-    FILE *reader = fopen("input.txt", "r");
+    FILE *reader = fopen(input, "r");
 
     // Allocate space.
     int **matrix = allocate2DArray(200, 200);
@@ -108,7 +108,7 @@ int **readInput() {
     // Close the reader.
     fclose(reader);
 
-    printf("Data read from input.txt.\n");
+    printf("Data read from %s.\n", input);
     return matrix;
 }
 
@@ -183,11 +183,11 @@ void collectParts(int size, int tag, int **resultPart, int **result) {
 /**
  * Processor 0 will use boss mode.
  */
-void bossMode(int size) {
+void bossMode(int size, char *input, char *output) {
     MPI_Request otherRequests;
     // The boss will read the input.
     printf("Reading the input.\n");
-    int **matrix = readInput();
+    int **matrix = readInput(input);
     
     // The boss will send the data to the slaves.
     int slaveRows = 200/(size-1);
@@ -224,10 +224,10 @@ void bossMode(int size) {
        MPI_Isend(&i, 1, MPI_INT, i, BOSS_RECEIVED_TRESHOLDED, MPI_COMM_WORLD, &otherRequests);
     }
     // Write output.
-    writeOutput(tresholded, 196, 196, "tresholded.txt");
+    writeOutput(tresholded, 196, 196, output);
 }
 
-int **processPart(int rank, int size, int **matrixPart, int tag) {
+int **processPart(int rank, int size, int **matrixPart, int tag, int tresholdNumber) {
     MPI_Status status;
     MPI_Request otherRequests;
 
@@ -328,7 +328,7 @@ int **processPart(int rank, int size, int **matrixPart, int tag) {
             if (tag == SMOOTHING_PROCESS) {
                 processResult[resultRow][currCol-1] = smooth(conv);
             } else if (tag == TRESHOLDING_PROCESS) {
-                processResult[resultRow][currCol-1] = treshold(conv);
+                processResult[resultRow][currCol-1] = treshold(conv, tresholdNumber);
             }
         }
     }
@@ -383,7 +383,7 @@ void waitForBoss(int rank, int size, int **currentPart, int tag) {
 /**
  * Processors 1, 2, ...,n will use slave mode. 
  */
-void slaveMode(int rank, int size) {
+void slaveMode(int rank, int size, int tresholdNumber) {
     MPI_Status status;
     MPI_Request otherRequests;
 
@@ -402,7 +402,7 @@ void slaveMode(int rank, int size) {
     }
 
     // Send the result to the boss and wait for its approval before continuing.
-    int **smoothedPart = processPart(rank, size, matrixPart, SMOOTHING_PROCESS);
+    int **smoothedPart = processPart(rank, size, matrixPart, SMOOTHING_PROCESS, tresholdNumber);
     MPI_Isend(&smoothedPart[0][0], smoothedRows*198, MPI_INT, 0, SMOOTHING_RESULT_TAG, MPI_COMM_WORLD, &otherRequests);
     waitForBoss(rank, size, matrixPart, BOSS_RECEIVED_SMOOTH);
 
@@ -412,7 +412,7 @@ void slaveMode(int rank, int size) {
         tresholdRows -= 2;
     }
 
-    int **tresholdPart = processPart(rank, size, smoothedPart, TRESHOLDING_PROCESS); 
+    int **tresholdPart = processPart(rank, size, smoothedPart, TRESHOLDING_PROCESS, tresholdNumber); 
     MPI_Isend(&tresholdPart[0][0], tresholdRows*196, MPI_INT, 0, TRESHOLDING_RESULT_TAG, MPI_COMM_WORLD, &otherRequests);
     waitForBoss(rank, size, matrixPart, BOSS_RECEIVED_TRESHOLDED);
 }
@@ -426,9 +426,12 @@ int main(int argc, char* argv[])
     
     // Processor 0 is the boss and the others are slaves.
     if (rank == 0) {
-        bossMode(size);
+        char *input = argv[1];
+        char *output = argv[2];
+        bossMode(size, input, output);
     } else {
-        slaveMode(rank, size);   
+        int tresholdNumber = atoi(argv[3]);
+        slaveMode(rank, size, tresholdNumber);   
     }
         
     MPI_Barrier(MPI_COMM_WORLD);
