@@ -19,7 +19,7 @@ isTxtToImg = 1;
 # Takes "input.txt" and shows the image representation
 # of the 2D array
 if isTxtToImg:
-	data = np.loadtxt("thresholded.txt")
+	data = np.loadtxt("out40.txt")
 	svimg = Image.fromarray(data.astype('uint8'))
 	svimg.show()
 else:
