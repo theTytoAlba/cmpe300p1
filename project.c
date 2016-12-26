@@ -151,10 +151,10 @@ void collectParts(int size, int tag, int **resultPart, int **result) {
         lack = 2;
     }
 
-
     for (int i = 0; i < size-1; i++) {
         int resultTag = (tag == COLLECT_SMOOTHED) ? SMOOTHING_RESULT_TAG : TRESHOLDING_RESULT_TAG;
         MPI_Recv(&resultPart[0][0], partSize, MPI_INT, MPI_ANY_SOURCE, resultTag, MPI_COMM_WORLD, &status);
+        //printf("here %d receiving %d.\n", i, status.MPI_SOURCE);
         // if it is the first or last one, take slaveRows-lack line.
         if (status.MPI_SOURCE == 1) {
             for (int j = 0; j < slaveRows-lack; j++) {
@@ -172,7 +172,11 @@ void collectParts(int size, int tag, int **resultPart, int **result) {
         } else {
             for (int j = 0; j < slaveRows; j++) {
                 for (int k = 0; k < columns; k++) {
-                    int resultRowStart = (status.MPI_SOURCE-1)*slaveRows - 1;
+                    int resultRowStart = (status.MPI_SOURCE-1)*slaveRows - lack;
+                    // if there are 200 processors this is possible for 2nd and 199th processors.
+                    if (resultRowStart < 0 || resultRowStart >= columns) {
+                        continue;
+                    }
                     result[resultRowStart + j][k] = resultPart[j][k];
                 }
             }
@@ -245,6 +249,10 @@ int **processPart(int rank, int size, int **matrixPart, int tag, int tresholdNum
         if ((rank == 1) || (rank == (size-1))) {
             rows -= 1;
             resultRows -= 2;
+            // If there are 200 processors this is possible.
+            if (resultRows < 0) {
+                resultRows = 0;
+            }
         }
     }
     
@@ -353,7 +361,6 @@ void waitForBoss(int rank, int size, int **currentPart, int tag) {
       //  processedRows -= lack;
     }
 
-    printf("Now waiting for boss to tell me its OK to continue.\n");
     int bossSaidOk = 0;
     while (!bossSaidOk) {
         int received;
@@ -393,7 +400,7 @@ void slaveMode(int rank, int size, int tresholdNumber) {
     
     // Receive matrix part.
     MPI_Recv(&matrixPart[0][0], rows*200, MPI_INT, 0, DEFAULT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    printf("Process %d has received the matrix part.\n", rank);
+    //printf("Process %d has received the matrix part.\n", rank);
     
     // Find the number of rows for this process.
     int smoothedRows = rows;
@@ -410,8 +417,11 @@ void slaveMode(int rank, int size, int tresholdNumber) {
     int tresholdRows = rows;
     if ((rank == 1) || (rank == (size-1))) {
         tresholdRows -= 2;
+        // This is possible if there are 200 processors.
+        if (tresholdRows < 0) {
+            tresholdRows = 0;
+        }
     }
-
     int **tresholdPart = processPart(rank, size, smoothedPart, TRESHOLDING_PROCESS, tresholdNumber); 
     MPI_Isend(&tresholdPart[0][0], tresholdRows*196, MPI_INT, 0, TRESHOLDING_RESULT_TAG, MPI_COMM_WORLD, &otherRequests);
     waitForBoss(rank, size, matrixPart, BOSS_RECEIVED_TRESHOLDED);
